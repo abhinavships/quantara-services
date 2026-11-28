@@ -1,3 +1,4 @@
+import json
 import pytest
 from quantara_core import crypto
 from quantara_core.bus import MemBus
@@ -267,3 +268,38 @@ def test_pipeline_escalation_to_signed_derate_and_route(monkeypatch):
     plan = bus.log[T("cloud.route")][0][1]
     assert plan["vehicle_id"] == "V1" and (plan.get("choice") or plan.get("nearest"))
     assert bus.log[T("cloud.twin")][0][1]["twin"]["ok"]
+
+
+# ---- Gemini second opinion (network faked; no key in repo) ----
+from svc import llm
+
+
+def _fake(cause="pump_fault", conf=0.8):
+    return lambda url, key, body, timeout: {"candidates": [{"content": {"parts": [{"text": json.dumps(
+        {"cause": cause, "confidence": conf, "rationale": "flow collapsed while pump duty is high"})}]}}]}
+
+
+def _rca():
+    return Rca().analyse(esc(cause="pump_fault", ev={"flow_ratio": 0.1, "heat_resid": 0.0, "power_frac": 0.8, "temp": 52}))
+
+
+def test_llm_off_without_key():
+    assert llm.second_opinion(_rca(), env={}, post=_fake()) is None
+
+
+def test_llm_valid_answer_is_returned_and_clipped():
+    r = llm.second_opinion(_rca(), env={"GEMINI_API_KEY": "k"}, post=_fake(conf=7))
+    assert r["cause"] == "pump_fault" and r["confidence"] == 1.0 and r["model"]
+
+
+def test_llm_unknown_cause_and_errors_are_discarded():
+    assert llm.second_opinion(_rca(), env={"GEMINI_API_KEY": "k"}, post=_fake(cause="aliens")) is None
+    def boom(*a): raise TimeoutError()
+    assert llm.second_opinion(_rca(), env={"GEMINI_API_KEY": "k"}, post=boom) is None
+
+
+def test_rca_service_attaches_llm_without_changing_verdict(monkeypatch):
+    monkeypatch.setattr(llm, "second_opinion", lambda r: {"cause": "pump_fault", "confidence": 0.9, "rationale": "x", "model": "m"})
+    out = RcaService().process("cloud.escalations", esc(cause="pump_fault", ev={"flow_ratio": 0.1, "heat_resid": 0.0, "power_frac": 0.8, "temp": 52}))
+    rca = next(m for t, m, _ in out if t == "cloud.rca")
+    assert rca["llm"]["cause"] == "pump_fault" and rca["top"] == "pump_fault"

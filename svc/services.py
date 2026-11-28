@@ -1,5 +1,5 @@
 """Per-role wrappers: process(topic_short, msg) -> [(out_topic_short, msg, key)]. One image, ROLE selects."""
-from . import route, twin
+from . import llm, route, twin
 from .rca import FleetCorrelator, Learning, Rca, base_cause
 
 DEFAULT_RULEBOOK = {"version": 1, "limits": {"warn": 45.0, "derate": 50.0, "critical": 58.0}, "rules": [
@@ -18,6 +18,8 @@ class RcaService:
         k = m.get("kind")
         if topic in ("cloud.escalations", "cloud.security"):
             r = self.rca.analyse(m); self.stats["rca"] += 1
+            op = llm.second_opinion(r)
+            if op: r["llm"] = op; self.stats["llm"] = self.stats.get("llm", 0) + 1
             out = [("cloud.rca", r, m.get("vehicle_id"))]
             f = self.fleet.add(m.get("ts", 0), m.get("vehicle_id"), m.get("incident", {}).get("cause"))
             return out + ([("cloud.fleet", f, None)] if f else [])
